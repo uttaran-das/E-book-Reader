@@ -11,6 +11,8 @@ import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
 import javax.xml.parsers.ParserConfigurationException;
 import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.zip.ZipEntry;
@@ -30,6 +32,8 @@ public class EpubParserService {
             Document containerDoc = builder.parse(zipFile.getInputStream(containerEntry));
             String opfPath = containerDoc.getElementsByTagName("rootfile").item(0).getAttributes()
                     .getNamedItem("full-path").getNodeValue();
+            String basePath = "";
+            if (opfPath.contains("/")) basePath = opfPath.substring(0, opfPath.lastIndexOf("/") + 1);
 
             // .opf
             ZipEntry opfEntry = zipFile.getEntry(opfPath);
@@ -46,7 +50,8 @@ public class EpubParserService {
             NodeList manifestItems = opfDoc.getElementsByTagName("item");
             for (int i = 0; i < manifestItems.getLength(); i++) {
                 Element item = (Element) manifestItems.item(i);
-                map.put(item.getAttribute("id"), item.getAttribute("href"));
+                String href = java.net.URLDecoder.decode(item.getAttribute("href"), StandardCharsets.UTF_8);
+                map.put(item.getAttribute("id"), basePath + href);
             }
 
             // spine
@@ -63,4 +68,27 @@ public class EpubParserService {
         return ebook;
     }
 
+    public String getChapterContent(String filePath, String chapterPath) {
+        try (ZipFile zipFile = new ZipFile(filePath)) {
+            ZipEntry entry = zipFile.getEntry(chapterPath);
+            if (entry == null) return "<h1>Error: Chapter not found in EPUB</h1>";
+            try (InputStream is = zipFile.getInputStream(entry)) {
+                return new String(is.readAllBytes(), StandardCharsets.UTF_8);
+            }
+        } catch (IOException e) {
+            return "<h1>Error reading chapter: " + e.getMessage() + "</h1>";
+        }
+    }
+
+    public byte[] getAsset(String filePath, String assetPath) {
+        try (ZipFile zipFile = new ZipFile(filePath)) {
+            ZipEntry entry = zipFile.getEntry(assetPath);
+            if (entry == null) return null;
+            try (InputStream is = zipFile.getInputStream(entry)) {
+                return is.readAllBytes();
+            }
+        } catch (IOException e) {
+            return null;
+        }
+    }
 }
