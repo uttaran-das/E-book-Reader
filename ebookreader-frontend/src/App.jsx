@@ -79,6 +79,7 @@ function App() {
   const [chapterLoading, setChapterLoading] = useState(false);
   const [theme, setTheme] = useState('dark'); // dark, sepia, light
   const [targetHash, setTargetHash] = useState("");
+  const [activeTocHref, setActiveTocHref] = useState(""); // active dropdown item
   
   const iframeRef = useRef(null);
 
@@ -97,6 +98,18 @@ function App() {
         setLoading(false);
       });
   }, []);
+
+  useEffect(() => {
+    if (!bookInfo?.toc || !bookInfo?.spine) return;
+
+    const currentPath = bookInfo.spine[currentChapterIndex];
+    const activePathBase = activeTocHref.split('#')[0];
+
+    if (currentPath !== activePathBase) {
+      const matchingToc = bookInfo.toc.find(item => item.href.split('#')[0] === currentPath);
+      setActiveTocHref(matchingToc ? matchingToc.href : "");
+    }
+  }, [currentChapterIndex, bookInfo, activeTocHref]);
 
   useEffect(() => {
     if (!bookInfo?.spine?.length) return;
@@ -181,6 +194,29 @@ function App() {
     }
   }
 
+  const handleTocChange = (e) => {
+    const selectedHref = e.target.value;
+    setActiveTocHref(selectedHref);
+    const [targetPath, hash] = selectedHref.split('#');
+    const targetIndex = bookInfo.spine.indexOf(targetPath);
+    if (targetIndex !== -1) {
+      if (targetIndex === currentChapterIndex) {
+        const iframeDoc = iframeRef.current?.contentDocument;
+        if (iframeDoc) {
+          if (hash) {
+            const el = iframeDoc.getElementById(hash) || iframeDoc.querySelector(`[name="${hash}"]`);
+            if (el) el.scrollIntoView({ behavior: 'smooth' });
+          } else {
+            iframeRef.current.contentWindow.scrollTo({ top: 0, behavior: 'smooth' });
+          }
+        }
+      } else {
+        if (hash) setTargetHash(hash);
+        setCurrentChapterIndex(targetIndex);
+      }
+    }
+  }
+
   const goToNext = () => {
     if(currentChapterIndex < bookInfo.spine.length-1) setCurrentChapterIndex(currentChapterIndex+1);
   }
@@ -212,9 +248,23 @@ function App() {
             Previous
           </button>
           
-          <code>
-            Section {currentChapterIndex + 1} of {bookInfo.spine.length}
-          </code>
+          {bookInfo.toc && bookInfo.toc.length > 0 ? (
+            <select
+              className="counter"
+              value={activeTocHref}
+              onChange={handleTocChange}
+              style={{ marginBottom: 0, cursor: 'pointer', maxWidth: '300px' }}
+            >
+              <option value="" disabled>--- Chapters ---</option>
+              {bookInfo.toc.map((item, idx) => (
+                <option key={idx} value={item.href}>
+                  {item.title}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <code>Section {currentChapterIndex + 1} of {bookInfo.spine.length}</code>
+          )}
           
           <button 
             className="counter" 

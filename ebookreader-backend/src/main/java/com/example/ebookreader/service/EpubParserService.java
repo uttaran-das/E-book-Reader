@@ -2,9 +2,7 @@ package com.example.ebookreader.service;
 
 import com.example.ebookreader.dto.EbookDto;
 import org.springframework.stereotype.Service;
-import org.w3c.dom.Document;
-import org.w3c.dom.Element;
-import org.w3c.dom.NodeList;
+import org.w3c.dom.*;
 import org.xml.sax.SAXException;
 
 import javax.xml.parsers.DocumentBuilder;
@@ -12,6 +10,7 @@ import javax.xml.parsers.DocumentBuilderFactory;
 import javax.xml.parsers.ParserConfigurationException;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -62,6 +61,39 @@ public class EpubParserService {
                 readingOrder.add(map.get(itemref.getAttribute("idref")));
             }
             ebook.setSpine(readingOrder);
+
+            // toc (.ncx)
+            ArrayList<EbookDto.TocItem> tocList = new ArrayList<>();
+            try {
+                Node tocAttribute = opfDoc.getElementsByTagName("spine").item(0).getAttributes().
+                        getNamedItem("toc");
+                if (tocAttribute != null) {
+                    String ncxId = tocAttribute.getNodeValue();
+                    String ncxPath = map.get(ncxId);
+                    if (ncxPath != null) {
+                        ZipEntry ncxEntry = zipFile.getEntry(ncxPath);
+                        Document ncxDoc = builder.parse(zipFile.getInputStream(ncxEntry));
+                        NodeList navPoints = ncxDoc.getElementsByTagName("navPoint");
+
+                        for (int i = 0; i < navPoints.getLength(); i++) {
+                            Element navPoint = (Element) navPoints.item(i);
+                            String humanReadableTitle = navPoint.getElementsByTagName("text").item(0).
+                                    getTextContent();
+                            String src = navPoint.getElementsByTagName("content").item(0).getAttributes().
+                                    getNamedItem("src").getNodeValue();
+                            src = URLDecoder.decode(src, StandardCharsets.UTF_8);
+                            EbookDto.TocItem tocItem = new EbookDto.TocItem();
+                            tocItem.setTitle(humanReadableTitle);
+                            tocItem.setHref(basePath + src);
+                            tocList.add(tocItem);
+                        }
+                    }
+                }
+            } catch (DOMException | SAXException | IOException e) {
+                System.out.println("Warning: Could not parse Table of Contents (.ncx)");
+                throw new RuntimeException(e);
+            }
+            ebook.setToc(tocList);
         } catch (IOException | ParserConfigurationException | SAXException e) {
             throw new RuntimeException(e);
         }
