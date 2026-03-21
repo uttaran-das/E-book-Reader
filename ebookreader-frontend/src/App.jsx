@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import './App.css';
+import iframeStyles from './iframe.css?raw';
 
 const resolvePath = (basePath, relativePath) => {
   const stack = basePath.split('/').slice(0,-1);
@@ -12,7 +13,7 @@ const resolvePath = (basePath, relativePath) => {
   return stack.join('/');
 }
 
-const transformChapterHtml = (html, chapterPath, resolvePath) => {
+const transformChapterHtml = (html, chapterPath, resolvePath, themeColors) => {
   const parser = new DOMParser();
   const doc = parser.parseFromString(html, "text/html");
 
@@ -49,11 +50,21 @@ const transformChapterHtml = (html, chapterPath, resolvePath) => {
 
   // Inject Base Styles
   const style = doc.createElement('style');
-  style.textContent = `
-    body { padding: 5%; font-family: sans-serif; line-height: 1.6; }
-    img { max-width: 100%; height: auto; display: block; margin: 0 auto; }
-  `;
+  style.textContent = iframeStyles;
   doc.head.appendChild(style);
+
+  const themeStyle = doc.createElement('style');
+  themeStyle.id = 'dynamic-theme';
+  themeStyle.textContent = `
+    html, body { 
+      background-color: ${themeColors.backgroundColor} !important; 
+      color: ${themeColors.color} !important; 
+    }
+    body * {
+      background-color: transparent !important;
+    }
+  `;
+  doc.head.appendChild(themeStyle);
 
   return doc.documentElement.outerHTML;
 }
@@ -65,7 +76,7 @@ const THEME_CYCLE = {
 };
 
 const themeStyles = {
-  dark: { backgroundColor: '#000000', color: '#e0e0e0' },
+  dark: { backgroundColor: '#1a1a1a', color: '#e0e0e0' },
   sepia: { backgroundColor: '#f4ecd8', color: '#433422' },
   default: { backgroundColor: '#ffffff', color: '#111111' }
 };
@@ -80,8 +91,14 @@ function App() {
   const [theme, setTheme] = useState('dark'); // dark, sepia, light
   const [targetHash, setTargetHash] = useState("");
   const [activeTocHref, setActiveTocHref] = useState(""); // active dropdown item
+  const [chapterPage, setChapterPage] = useState(0);
+  const [chapterTotalPages, setChapterTotalPages] = useState(1);
+  const [startAtLastPage, setStartAtLastPage] = useState(false); // Used when clicking Previous on page 0
   
   const iframeRef = useRef(null);
+  const themeRef = useRef(theme);
+
+  useEffect(() => {themeRef.current = theme;}, [theme]);
 
   useEffect(() => {
     fetch('http://localhost:8080/api/book/info')
@@ -122,7 +139,8 @@ function App() {
     fetch(`http://localhost:8080/api/book/chapter?chapterPath=${encodeURIComponent(chapterPath)}`, { signal: controller.signal })
       .then(res => res.text())
       .then(html => {
-        const processedHtml = transformChapterHtml(html, chapterPath, resolvePath);
+        const currentThemeColors = themeStyles[themeRef.current] ?? themeStyles.default;
+        const processedHtml = transformChapterHtml(html, chapterPath, resolvePath, currentThemeColors);
         setChapterContent(processedHtml);
         setChapterLoading(false);
       })
@@ -134,19 +152,26 @@ function App() {
   }, [bookInfo, currentChapterIndex, resolvePath]);
 
   useEffect(() => {
-    const hanleMessage = (e) => {
+    const handleMessage = (e) => {
       if (e.data?.type !== 'epub-link') return;
       const [targetPath, hash] = decodeURIComponent(e.data.href).split('#');
 
-      const scrollInsideIframe = (targetHash) => {
+      const calculatePageForHash = (targetHash) => {
         const iframeDoc = iframeRef.current?.contentDocument;
-        const el = iframeDoc?.getElementById(targetHash) || iframeDoc?.querySelector(`[name="${targetHash}"]`);
-        el?.scrollIntoView({ behavior: 'smooth' });
+        const iframeWin = iframeRef.current?.contentWindow;
+        if (!iframeDoc || !iframeWin) return;
+
+        const el = iframeDoc.getElementById(targetHash) || iframeDoc.querySelector(`[name="${targetHash}"]`);
+        if (el) {
+          const absLeft = el.getBoundingClientRect().left + iframeWin.scrollX;
+          const page = Math.floor(absLeft/iframeWin.innerWidth);
+          setChapterPage(page);
+        }
       }
 
       // hash link
       if (!targetPath && hash) {
-        scrollInsideIframe(hash);
+        calculatePageForHash(hash);
       } else {
         // file link
         const currentChapterPath = bookInfo.spine[currentChapterIndex];
@@ -155,7 +180,7 @@ function App() {
 
         if (targetIndex !== -1){
           if (targetIndex === currentChapterIndex) {
-            if (hash) scrollInsideIframe(hash);
+            if (hash) calculatePageForHash(hash);
           } else {
             if (hash) setTargetHash(hash);
             setCurrentChapterIndex(targetIndex);
@@ -166,32 +191,116 @@ function App() {
       }
     };
 
-    window.addEventListener('message', hanleMessage);
-    return () => window.removeEventListener('message', hanleMessage);
-  }, [bookInfo, currentChapterIndex, resolvePath]);
+    window.addEventListener('message', handleMessage);
+    return () => window.removeEventListener('message', handleMessage);
+  }, [bookInfo, currentChapterIndex]);
 
   useEffect(() => {
-    const body = iframeRef.current?.contentDocument?.body;
-    if(!body) return;
+    const iframeDoc = iframeRef.current?.contentDocument;
+    if (!iframeDoc) return;
+
     const { backgroundColor, color } = themeStyles[theme] ?? themeStyles.default;
-    Object.assign(body.style, { backgroundColor, color });
+    const themeStyleEl = iframeDoc.getElementById('dynamic-theme');
+
+    if (themeStyleEl) {
+      themeStyleEl.textContent = `
+        html, body { 
+          background-color: ${backgroundColor} !important; 
+          color: ${color} !important; 
+        }
+        body * {
+          background-color: transparent !important;
+        }
+      `;
+    }
   }, [theme]);
+
+  const updateDropdownToMatchPage = (currentPageIndex) => {
+    if (!bookInfo.toc || !bookInfo?.spine) return;
+
+    const currentPath = bookInfo.spine[currentChapterIndex];
+    const iframeDoc = iframeRef.current?.contentDocument;
+    const iframeWin = iframeRef.current?.contentWindow;
+    if (!iframeDoc || !iframeWin) return;
+
+    const itemsInFile = bookInfo.toc.filter(item => item.href.split('#')[0] === currentPath);
+    if (itemsInFile.length === 0) return;
+
+    let bestMatchHref = itemsInFile[0].href;
+    let highestValidPage = -1;
+
+    for (const item of itemsInFile) {
+      const hash = item.href.split('#')[1];
+      let elPage = 0;
+      if (hash) {
+        const el = iframeDoc.getElementById(hash) || iframeDoc.querySelector(`[name="${hash}"]`);
+        if (el) {
+          const absLeft = el.getBoundingClientRect().left + iframeWin.scrollX;
+          elPage = Math.floor(absLeft/iframeWin.innerWidth);
+        }
+      }
+      if (elPage <= currentPageIndex && elPage >= highestValidPage) {
+        bestMatchHref = item.href;
+        highestValidPage = elPage;
+      }
+    }
+
+    setActiveTocHref(bestMatchHref);
+  }
+
+  useEffect(() => {
+    const iframeWin = iframeRef.current?.contentWindow;
+    if (iframeWin) {
+      iframeWin.scrollTo({ left: chapterPage * iframeWin.innerWidth, behavior: 'smooth' });
+      updateDropdownToMatchPage(chapterPage);
+    }
+  }, [chapterPage, bookInfo, currentChapterIndex]);
 
   const handleIframeLoad = () => {
     const iframeDoc = iframeRef.current?.contentDocument;
-    if (!iframeDoc || !iframeDoc.body) return;
+    const iframeWin = iframeRef.current?.contentWindow;
+    if (!iframeDoc || !iframeDoc.body || !iframeWin) return;
 
     // Re-apply theme on a new section
     const { backgroundColor, color } = themeStyles[theme] ?? themeStyles.default;
-    Object.assign(iframeDoc.body.style, { backgroundColor, color });
-    
-    if (targetHash) {
-      setTimeout(() => {
-        const el = iframeDoc.getElementById(targetHash) || iframeDoc.querySelector(`[name="${targetHash}"]`);
-        if (el) el.scrollIntoView({ behavior: 'smooth' });
-        setTargetHash(""); // Need to clear hash otherwise it will get stuck
-      }, 100);
+    const themeStyleEl = iframeDoc.getElementById('dynamic-theme');
+
+    if (themeStyleEl) {
+      themeStyleEl.textContent = `
+        html, body { 
+          background-color: ${backgroundColor} !important; 
+          color: ${color} !important; 
+        }
+        body * {
+          background-color: transparent !important;
+        }
+      `;
     }
+
+    // Slight delay to allow the browser to calculate column widths
+    setTimeout(() => {
+      const totalWidth = iframeDoc.body.scrollWidth;
+      const viewportWidth = iframeWin.innerWidth;
+      // -5 pixel buffer prevents browsers from calculating phantom blank pages
+      const pages = Math.max(1, Math.ceil((totalWidth-5)/viewportWidth));
+      setChapterTotalPages(pages);
+
+      let targetPage = 0;
+
+      if (targetHash) {
+        const el = iframeDoc.getElementById(targetHash) || iframeDoc.querySelector(`[name="${targetHash}"]`);
+        if (el) {
+          const absLeft = el.getBoundingClientRect().left + iframeWin.scrollX;
+          targetPage = Math.floor(absLeft/iframeWin.innerWidth);
+        }
+        setTargetHash(""); // Need to clear hash otherwise it will get stuck
+      } else if (startAtLastPage) {
+        targetPage = pages-1; // Jump to last page of the chapter we just moved backwards into
+        setStartAtLastPage(false);
+      }
+      setChapterPage(targetPage);
+      updateDropdownToMatchPage(targetPage);
+    }, 100);
   }
 
   const handleTocChange = (e) => {
@@ -204,31 +313,46 @@ function App() {
         const iframeDoc = iframeRef.current?.contentDocument;
         if (iframeDoc) {
           if (hash) {
-            const el = iframeDoc.getElementById(hash) || iframeDoc.querySelector(`[name="${hash}"]`);
-            if (el) el.scrollIntoView({ behavior: 'smooth' });
+            const iframeDoc = iframeRef.current?.contentDocument;
+            const iframeWin = iframeRef.current?.contentWindow;
+            if (iframeDoc && iframeWin) {
+              const el = iframeDoc.getElementById(hash) || iframeDoc.querySelector(`[name="${hash}"]`);
+              if (el) {
+                const absLeft = el.getBoundingClientRect().left + iframeWin.scrollX;
+                setChapterPage(Math.floor(absLeft/iframeWin.innerWidth));
+              }
+            }
           } else {
-            iframeRef.current.contentWindow.scrollTo({ top: 0, behavior: 'smooth' });
+            setChapterPage(0);
           }
         }
       } else {
         if (hash) setTargetHash(hash);
+        setStartAtLastPage(false);
         setCurrentChapterIndex(targetIndex);
       }
     }
   }
 
   const goToNext = () => {
-    if(currentChapterIndex < bookInfo.spine.length-1) setCurrentChapterIndex(currentChapterIndex+1);
+    if (chapterPage < chapterTotalPages-1) setChapterPage(prev => prev+1);
+    else if (currentChapterIndex < bookInfo.spine.length-1) setCurrentChapterIndex(currentChapterIndex+1);
   }
 
   const goToPrev = () => {
-    if(currentChapterIndex > 0) setCurrentChapterIndex(currentChapterIndex-1);
+    if (chapterPage > 0) setChapterPage(prev => prev-1);
+    else if(currentChapterIndex > 0) {
+      setStartAtLastPage(true); // next chapter to start at its end
+      setCurrentChapterIndex(currentChapterIndex-1);
+    }
   }
 
   const cycleTheme = () => setTheme(current => THEME_CYCLE[current] ?? 'light');
 
   if (loading) return <div className="loading">Loading book details...</div>;
   if (error) return <div className="error">Error: {error}</div>;
+
+  const currentThemeConfig = themeStyles[theme] ?? themeStyles.default;
 
   return (
     <>
@@ -238,22 +362,20 @@ function App() {
           <h2>By {bookInfo.author}</h2>
         </div>
 
-        <div style={{ display: 'flex', gap: '16px', alignItems: 'center', justifyContent: 'center' }}>
+        <div className='controls-container'>
           <button 
-            className="counter" 
+            className="counter nav-button" 
             onClick={goToPrev} 
-            disabled={currentChapterIndex === 0}
-            style={{ marginBottom: 0, cursor: currentChapterIndex === 0 ? 'not-allowed' : 'pointer' }}
+            disabled={currentChapterIndex === 0 && chapterPage === 0}
           >
             Previous
           </button>
           
           {bookInfo.toc && bookInfo.toc.length > 0 ? (
             <select
-              className="counter"
+              className="counter toc-select"
               value={activeTocHref}
               onChange={handleTocChange}
-              style={{ marginBottom: 0, cursor: 'pointer', maxWidth: '300px' }}
             >
               <option value="" disabled>--- Chapters ---</option>
               {bookInfo.toc.map((item, idx) => (
@@ -262,37 +384,36 @@ function App() {
                 </option>
               ))}
             </select>
-          ) : (
-            <code>Section {currentChapterIndex + 1} of {bookInfo.spine.length}</code>
-          )}
+          ) : null}
+
+          <code className='page-tracker'>
+            Page {chapterPage+1} of {chapterTotalPages}
+          </code>
           
           <button 
-            className="counter" 
+            className="counter nav-button" 
             onClick={goToNext} 
-            disabled={currentChapterIndex === bookInfo.spine.length - 1}
-            style={{ marginBottom: 0, cursor: currentChapterIndex === bookInfo.spine.length - 1 ? 'not-allowed' : 'pointer' }}
+            disabled={currentChapterIndex === bookInfo.spine.length - 1 && chapterPage === chapterTotalPages}
           >
             Next
           </button>
 
-          <button 
-            className="counter" onClick={cycleTheme}
-            style={{ marginBottom: 0, cursor: 'pointer', marginLeft: '20px' }}
-          >
+          <button className="counter time-button" onClick={cycleTheme}>
             Theme: {theme.charAt(0).toUpperCase() + theme.slice(1)}
           </button>
         </div>
       </div>
 
-      <div id="reader" style={{ padding: 0 }}>
+      <div id="reader" style={{ backgroundColor: currentThemeConfig.backgroundColor }}>
         {chapterLoading ? (
-          <p style={{ padding: '32px' }}>Loading chapter text...</p>
+          <p style={{ color: currentThemeConfig.color, textAlign: 'center' }}>Loading chapter text...</p>
         ) : (
           <iframe 
-          ref={iframeRef}
+            ref={iframeRef}
             srcDoc={chapterContent} 
             title="Book Reader"
             onLoad={handleIframeLoad}
+            className='reader-iframe'
             style={{ 
               width: '100%', 
               height: '70vh',

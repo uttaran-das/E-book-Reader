@@ -1,0 +1,36 @@
+html { 
+  height: 100%; 
+  overflow: hidden; 
+}
+
+body { 
+  height: 100%; 
+  width: 100vw !important;
+  
+  margin: 0 !important; 
+  padding: 0 !important; 
+  box-sizing: border-box !important; 
+  
+  column-width: 100vw !important; 
+  column-gap: 0 !important; 
+  column-fill: auto !important;
+  
+  overflow-wrap: break-word !important; 
+  word-wrap: break-word !important; 
+  
+  transition: background 0.3s, color 0.3s; 
+  font-family: sans-serif; 
+  line-height: 1.6;
+}
+
+* {
+  max-width: 100vw !important;
+}
+
+img, svg, video { 
+  max-width: 100% !important; 
+  max-height: 90vh !important; 
+  object-fit: contain; 
+  display: block; 
+  margin: 0 auto; 
+}
