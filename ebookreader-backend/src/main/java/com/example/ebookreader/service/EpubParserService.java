@@ -2,6 +2,7 @@ package com.example.ebookreader.service;
 
 import com.example.ebookreader.dto.EbookDto;
 import org.springframework.stereotype.Service;
+import org.springframework.web.multipart.MultipartFile;
 import org.w3c.dom.*;
 import org.xml.sax.SAXException;
 
@@ -12,15 +13,26 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
 @Service
 public class EpubParserService {
 
-    public EbookDto parseEpub(String filePath) {
+    // key = bookId, Value = File path
+    private final Map<String, String> uploadedBooks = new ConcurrentHashMap<>();
+
+    public EbookDto parseEpub(String bookId) {
+        String filePath = uploadedBooks.get(bookId);
+        if (filePath == null) throw new RuntimeException("Book not found!");
+
         EbookDto ebook = new EbookDto();
 
         try (ZipFile zipFile = new ZipFile(filePath)) {
@@ -100,7 +112,10 @@ public class EpubParserService {
         return ebook;
     }
 
-    public String getChapterContent(String filePath, String chapterPath) {
+    public String getChapterContent(String bookId, String chapterPath) {
+        String filePath = uploadedBooks.get(bookId);
+        if (filePath == null) throw new RuntimeException("Book not found!");
+
         try (ZipFile zipFile = new ZipFile(filePath)) {
             ZipEntry entry = zipFile.getEntry(chapterPath);
             if (entry == null) return "<h1>Error: Chapter not found in EPUB</h1>";
@@ -112,7 +127,10 @@ public class EpubParserService {
         }
     }
 
-    public byte[] getAsset(String filePath, String assetPath) {
+    public byte[] getAsset(String bookId, String assetPath) {
+        String filePath = uploadedBooks.get(bookId);
+        if (filePath == null) throw new RuntimeException("Book not found!");
+
         try (ZipFile zipFile = new ZipFile(filePath)) {
             ZipEntry entry = zipFile.getEntry(assetPath);
             if (entry == null) return null;
@@ -122,5 +140,13 @@ public class EpubParserService {
         } catch (IOException e) {
             return null;
         }
+    }
+
+    public String uploadBook(MultipartFile file) throws IOException {
+        String bookId = UUID.randomUUID().toString();
+        Path tempFile = Files.createTempFile("epub_", "_" + bookId + ".epub");
+        file.transferTo(tempFile.toFile());
+        uploadedBooks.put(bookId, tempFile.toString());
+        return bookId;
     }
 }

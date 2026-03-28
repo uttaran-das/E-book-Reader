@@ -13,7 +13,7 @@ const resolvePath = (basePath, relativePath) => {
   return stack.join('/');
 }
 
-const transformChapterHtml = (html, chapterPath, resolvePath, themeColors) => {
+const transformChapterHtml = (html, chapterPath, resolvePath, themeColors, bookId) => {
   const parser = new DOMParser();
   const doc = parser.parseFromString(html, "text/html");
 
@@ -22,7 +22,7 @@ const transformChapterHtml = (html, chapterPath, resolvePath, themeColors) => {
     const val = el.getAttribute(attr);
     if (val && !val.startsWith("http") && !val.startsWith("data:")) {
       const absolutePath = resolvePath(chapterPath, val);
-      el.setAttribute(attr, `http://localhost:8080/api/book/asset?assetPath=${encodeURIComponent(absolutePath)}`);
+      el.setAttribute(attr, `http://localhost:8080/api/book/asset?bookId=${bookId}&assetPath=${encodeURIComponent(absolutePath)}`);
     }
   };
 
@@ -81,10 +81,16 @@ const themeStyles = {
   default: { backgroundColor: '#ffffff', color: '#111111' }
 };
 
+const getExactWidth = (iframeDoc, iframeWin) => {
+  return iframeDoc.documentElement.getBoundingClientRect().width || iframeWin.innerWidth;
+}
+
 function App() {
+  const [bookId, setBookId] = useState(null);
+  const [isUploading, setIsUploading] = useState(false);
   const [bookInfo, setBookInfo] = useState(null);
   const [error, setError] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [currentChapterIndex, setCurrentChapterIndex] = useState(0);
   const [chapterContent, setChapterContent] = useState("");
   const [chapterLoading, setChapterLoading] = useState(false);
@@ -100,8 +106,37 @@ function App() {
 
   useEffect(() => {themeRef.current = theme;}, [theme]);
 
+  const handleFileUpload = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    setIsUploading(true);
+    setError(null);
+
+    const formData = new FormData();
+    formData.append("file", file);
+
+    fetch('http://localhost:8080/api/book/upload', {
+      method: 'POST',
+      body: formData,
+    })
+      .then((res) => {
+        if (!res.ok) throw new Error("Failed to upload book.");
+        return res.json();
+      })
+      .then((data) => {
+        setBookId(data.bookId);
+        setIsUploading(false);
+      })
+      .catch((err) => {
+        setError(err.message);
+        setIsUploading(false);
+      });
+  }
+
   useEffect(() => {
-    fetch('http://localhost:8080/api/book/info')
+    if (!bookId) return;
+    setLoading(true);
+    fetch(`http://localhost:8080/api/book/info?bookId=${bookId}`)
       .then((response) => {
         if (!response.ok) throw new Error("Failed to fetch book info");
         return response.json();
@@ -114,33 +149,21 @@ function App() {
         setError(err.message);
         setLoading(false);
       });
-  }, []);
+  }, [bookId]);
 
   useEffect(() => {
-    if (!bookInfo?.toc || !bookInfo?.spine) return;
-
-    const currentPath = bookInfo.spine[currentChapterIndex];
-    const activePathBase = activeTocHref.split('#')[0];
-
-    if (currentPath !== activePathBase) {
-      const matchingToc = bookInfo.toc.find(item => item.href.split('#')[0] === currentPath);
-      setActiveTocHref(matchingToc ? matchingToc.href : "");
-    }
-  }, [currentChapterIndex, bookInfo, activeTocHref]);
-
-  useEffect(() => {
-    if (!bookInfo?.spine?.length) return;
+    if (!bookInfo?.spine?.length || !bookId) return;
 
     const controller = new AbortController();
     const chapterPath = bookInfo.spine[currentChapterIndex];
     
     setChapterLoading(true);
 
-    fetch(`http://localhost:8080/api/book/chapter?chapterPath=${encodeURIComponent(chapterPath)}`, { signal: controller.signal })
+    fetch(`http://localhost:8080/api/book/chapter?bookId=${bookId}&chapterPath=${encodeURIComponent(chapterPath)}`, { signal: controller.signal })
       .then(res => res.text())
       .then(html => {
         const currentThemeColors = themeStyles[themeRef.current] ?? themeStyles.default;
-        const processedHtml = transformChapterHtml(html, chapterPath, resolvePath, currentThemeColors);
+        const processedHtml = transformChapterHtml(html, chapterPath, resolvePath, currentThemeColors, bookId);
         setChapterContent(processedHtml);
         setChapterLoading(false);
       })
@@ -149,7 +172,7 @@ function App() {
       });
 
     return () => controller.abort(); // Cleanup pending fetch if chapter changes fast
-  }, [bookInfo, currentChapterIndex, resolvePath]);
+  }, [bookInfo, currentChapterIndex, bookId]);
 
   useEffect(() => {
     const handleMessage = (e) => {
@@ -164,7 +187,7 @@ function App() {
         const el = iframeDoc.getElementById(targetHash) || iframeDoc.querySelector(`[name="${targetHash}"]`);
         if (el) {
           const absLeft = el.getBoundingClientRect().left + iframeWin.scrollX;
-          const page = Math.floor(absLeft/iframeWin.innerWidth);
+          const page = Math.floor(absLeft/getExactWidth(iframeDoc, iframeWin));
           setChapterPage(page);
         }
       }
@@ -236,7 +259,7 @@ function App() {
         const el = iframeDoc.getElementById(hash) || iframeDoc.querySelector(`[name="${hash}"]`);
         if (el) {
           const absLeft = el.getBoundingClientRect().left + iframeWin.scrollX;
-          elPage = Math.floor(absLeft/iframeWin.innerWidth);
+          elPage = Math.floor(absLeft/getExactWidth(iframeDoc, iframeWin));
         }
       }
       if (elPage <= currentPageIndex && elPage >= highestValidPage) {
@@ -249,12 +272,38 @@ function App() {
   }
 
   useEffect(() => {
+    const iframeDoc = iframeRef.current?.contentDocument;
     const iframeWin = iframeRef.current?.contentWindow;
     if (iframeWin) {
-      iframeWin.scrollTo({ left: chapterPage * iframeWin.innerWidth, behavior: 'smooth' });
+      iframeWin.scrollTo({ left: chapterPage * getExactWidth(iframeDoc, iframeWin), behavior: 'smooth' });
       updateDropdownToMatchPage(chapterPage);
     }
   }, [chapterPage, bookInfo, currentChapterIndex]);
+
+  useEffect(() => {
+    const handleResize = () => {
+      const iframeDoc = iframeRef.current?.contentDocument;
+      const iframeWin = iframeRef.current?.contentWindow;
+      if(!iframeDoc || !iframeWin) return;
+       
+      const totalWidth = iframeDoc.body.scrollWidth;
+      const viewportWidth = getExactWidth(iframeDoc, iframeWin);
+      const newTotalPages = Math.max(1, Math.ceil((totalWidth - 5)/viewportWidth));
+      setChapterTotalPages(newTotalPages);
+      setChapterPage(prevPage => {
+        const clampedPage = Math.min(prevPage, newTotalPages - 1);
+        iframeWin.scrollTo({ left: clampedPage * viewportWidth, behavior: 'instant' });
+        return clampedPage;
+      })
+    }
+    window.addEventListener('resize', handleResize);
+    const iframeWin = iframeRef.current?.contentWindow;
+    if (iframeWin) iframeWin.addEventListener('resize', handleResize);
+    return () => {
+      window.removeEventListener('resize', handleResize);
+      if (iframeWin) iframeWin.removeEventListener('resize', handleResize);
+    };
+  }, []);
 
   const handleIframeLoad = () => {
     const iframeDoc = iframeRef.current?.contentDocument;
@@ -280,7 +329,7 @@ function App() {
     // Slight delay to allow the browser to calculate column widths
     setTimeout(() => {
       const totalWidth = iframeDoc.body.scrollWidth;
-      const viewportWidth = iframeWin.innerWidth;
+      const viewportWidth = getExactWidth(iframeDoc, iframeWin);
       // -5 pixel buffer prevents browsers from calculating phantom blank pages
       const pages = Math.max(1, Math.ceil((totalWidth-5)/viewportWidth));
       setChapterTotalPages(pages);
@@ -291,7 +340,7 @@ function App() {
         const el = iframeDoc.getElementById(targetHash) || iframeDoc.querySelector(`[name="${targetHash}"]`);
         if (el) {
           const absLeft = el.getBoundingClientRect().left + iframeWin.scrollX;
-          targetPage = Math.floor(absLeft/iframeWin.innerWidth);
+          targetPage = Math.floor(absLeft/viewportWidth);
         }
         setTargetHash(""); // Need to clear hash otherwise it will get stuck
       } else if (startAtLastPage) {
@@ -319,7 +368,7 @@ function App() {
               const el = iframeDoc.getElementById(hash) || iframeDoc.querySelector(`[name="${hash}"]`);
               if (el) {
                 const absLeft = el.getBoundingClientRect().left + iframeWin.scrollX;
-                setChapterPage(Math.floor(absLeft/iframeWin.innerWidth));
+                setChapterPage(Math.floor(absLeft/getExactWidth(iframeDoc, iframeWin)));
               }
             }
           } else {
@@ -349,7 +398,26 @@ function App() {
 
   const cycleTheme = () => setTheme(current => THEME_CYCLE[current] ?? 'light');
 
-  if (loading) return <div className="loading">Loading book details...</div>;
+  if (!bookId) {
+    return (
+      <div id="center" style={{ marginTop: '100px' }}>
+        <h1>Ebook Reader</h1>
+        <p>Please select an EPUB file from your computer to begin.</p>
+        
+        <input 
+          type="file" 
+          accept=".epub" 
+          onChange={handleFileUpload} 
+          style={{ margin: '20px 0', fontSize: '16px' }}
+        />
+        
+        {isUploading && <p>Uploading and processing...</p>}
+        {error && <p className="error" style={{ color: 'red' }}>{error}</p>}
+      </div>
+    );
+  }
+
+  if (loading || !bookInfo) return <div className="loading">Loading book details...</div>;
   if (error) return <div className="error">Error: {error}</div>;
 
   const currentThemeConfig = themeStyles[theme] ?? themeStyles.default;
@@ -393,12 +461,12 @@ function App() {
           <button 
             className="counter nav-button" 
             onClick={goToNext} 
-            disabled={currentChapterIndex === bookInfo.spine.length - 1 && chapterPage === chapterTotalPages}
+            disabled={currentChapterIndex === bookInfo.spine.length - 1 && chapterPage === chapterTotalPages - 1}
           >
             Next
           </button>
 
-          <button className="counter time-button" onClick={cycleTheme}>
+          <button className="counter theme-button" onClick={cycleTheme}>
             Theme: {theme.charAt(0).toUpperCase() + theme.slice(1)}
           </button>
         </div>
