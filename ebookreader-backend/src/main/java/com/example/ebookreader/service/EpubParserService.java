@@ -1,6 +1,12 @@
 package com.example.ebookreader.service;
 
 import com.example.ebookreader.dto.EbookDto;
+import com.example.ebookreader.entity.Book;
+import com.example.ebookreader.entity.Bookmark;
+import com.example.ebookreader.repository.BookRepository;
+import com.example.ebookreader.repository.BookmarkRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 import org.w3c.dom.*;
@@ -15,23 +21,37 @@ import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
+import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
+import java.security.MessageDigest;
+import java.util.*;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
 @Service
 public class EpubParserService {
 
-    // key = bookId, Value = File path
-    private final Map<String, String> uploadedBooks = new ConcurrentHashMap<>();
+    private static final Logger logger = LoggerFactory.getLogger(EpubParserService.class);
+
+    private final BookRepository bookRepository;
+    private final BookmarkRepository bookmarkRepository;
+    private final Path uploadPath;
+
+    public EpubParserService(BookRepository bookRepository, BookmarkRepository bookmarkRepository){
+        this.bookRepository = bookRepository;
+        this.bookmarkRepository = bookmarkRepository;
+        this.uploadPath = Paths.get("library_files").toAbsolutePath().normalize();
+
+        try{
+            Files.createDirectories(this.uploadPath);
+            logger.info("Library folder ready at: {}", this.uploadPath);
+        } catch (IOException e) {
+            throw new RuntimeException("Could not create upload directory: " + this.uploadPath, e);
+        }
+    }
 
     public EbookDto parseEpub(String bookId) {
-        String filePath = uploadedBooks.get(bookId);
-        if (filePath == null) throw new RuntimeException("Book not found!");
+        String filePath = getFilePathFromDb(bookId);
 
         EbookDto ebook = new EbookDto();
 
@@ -113,8 +133,7 @@ public class EpubParserService {
     }
 
     public String getChapterContent(String bookId, String chapterPath) {
-        String filePath = uploadedBooks.get(bookId);
-        if (filePath == null) throw new RuntimeException("Book not found!");
+        String filePath = getFilePathFromDb(bookId);
 
         try (ZipFile zipFile = new ZipFile(filePath)) {
             ZipEntry entry = zipFile.getEntry(chapterPath);
@@ -128,8 +147,7 @@ public class EpubParserService {
     }
 
     public byte[] getAsset(String bookId, String assetPath) {
-        String filePath = uploadedBooks.get(bookId);
-        if (filePath == null) throw new RuntimeException("Book not found!");
+        String filePath = getFilePathFromDb(bookId);
 
         try (ZipFile zipFile = new ZipFile(filePath)) {
             ZipEntry entry = zipFile.getEntry(assetPath);
@@ -142,11 +160,115 @@ public class EpubParserService {
         }
     }
 
-    public String uploadBook(MultipartFile file) throws IOException {
+    public String uploadBook(MultipartFile file) throws Exception {
         String bookId = UUID.randomUUID().toString();
-        Path tempFile = Files.createTempFile("epub_", "_" + bookId + ".epub");
-        file.transferTo(tempFile.toFile());
-        uploadedBooks.put(bookId, tempFile.toString());
+        Path destination = this.uploadPath.resolve(bookId + ".epub");
+        Files.copy(file.getInputStream(), destination, StandardCopyOption.REPLACE_EXISTING);
+
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        try(InputStream is = Files.newInputStream(destination)){
+            byte[] buffer = new byte[8192]; // 8KB: Optimal size for OS page alignment and disk I/O throughput
+            int bytesRead;
+            while((bytesRead=is.read(buffer))!=-1) digest.update(buffer,0,bytesRead);
+        }
+
+        String fileHash= HexFormat.of().formatHex(digest.digest());
+        if(bookRepository.existsByFileHash(fileHash)) {
+            Files.deleteIfExists(destination);
+            logger.warn("Rejected duplicate file upload. Hash: {}", fileHash);
+            throw new RuntimeException("DUPLICATE: This exact file is already in your library.");
+        }
+
+        Book book = new Book();
+        book.setId(bookId);
+        book.setFilePath(destination.toString());
+        book.setFileHash(fileHash);
+
+        try(ZipFile zipFile = new ZipFile(destination.toFile())){
+            DocumentBuilder builder = DocumentBuilderFactory.newInstance().newDocumentBuilder();
+            ZipEntry containerEntry = zipFile.getEntry("META-INF/container.xml");
+            Document containerDoc = builder.parse(zipFile.getInputStream(containerEntry));
+            String opfPath = containerDoc.getElementsByTagName("rootfile").item(0).getAttributes()
+                    .getNamedItem("full-path").getNodeValue();
+            String basePath = opfPath.contains("/")?opfPath.substring(0,opfPath.lastIndexOf("/")+1):"";
+            ZipEntry opfEntry = zipFile.getEntry(opfPath);
+            Document opfDoc = builder.parse(zipFile.getInputStream(opfEntry));
+
+            // Title
+            NodeList titleNodes = opfDoc.getElementsByTagName("dc:title");
+            if(titleNodes.getLength()>0) book.setTitle(titleNodes.item(0).getTextContent());
+
+            // Author
+            NodeList authorNodes = opfDoc.getElementsByTagName("dc:creator");
+            if(authorNodes.getLength()>0) book.setAuthor(authorNodes.item(0).getTextContent());
+
+            // Language
+            NodeList langNodes = opfDoc.getElementsByTagName("dc:language");
+            if(langNodes.getLength() > 0) book.setLanguage(langNodes.item(0).getTextContent());
+
+            // Total chapters
+            NodeList spineNodes = opfDoc.getElementsByTagName("itemref");
+            book.setTotalChapters(Math.max(1, spineNodes.getLength()));
+
+            // Image
+            String coverId = null;
+            NodeList metaNodes = opfDoc.getElementsByTagName("meta");
+            for(int i=0; i<metaNodes.getLength(); i++){
+                Element meta = (Element) metaNodes.item(i);
+                if("cover".equals(meta.getAttribute("name"))){
+                    coverId = meta.getAttribute("content");
+                    break;
+                }
+            }
+            NodeList itemNodes = opfDoc.getElementsByTagName("item");
+            for(int i = 0; i < itemNodes.getLength(); i++) {
+                Element item = (Element) itemNodes.item(i);
+                // Matches EPUB 2 cover ID or EPUB 3 cover-image property
+                if(item.getAttribute("id").equals(coverId)
+                        || "cover-image".equals(item.getAttribute("properties"))) {
+                    book.setCoverPath(basePath + item.getAttribute("href"));
+                    break;
+                }
+            }
+        }
+
+        bookRepository.save(book);
         return bookId;
+    }
+
+    private String getFilePathFromDb(String bookId) {
+        return bookRepository.findById(bookId).orElseThrow(() -> new RuntimeException("Book not found in database."))
+                .getFilePath();
+    }
+
+    public List<Book> getAllBooks(){
+        return bookRepository.findAll();
+    }
+
+    public void updateLastReadPosition(String bookId, int chapterIndex, double progress){
+        Book book = bookRepository.findById(bookId).orElse(null);
+        if(book!=null){
+            book.setLastReadChapterIndex(chapterIndex);
+            book.setLastReadProgress(progress);
+            bookRepository.save(book);
+        }
+    }
+
+    public void saveBookmark(String bookId, String name, String note, int chapterIndex, String chapterTitle, double progress){
+        Bookmark bookmark = new Bookmark();
+        bookmark.setId(UUID.randomUUID().toString());
+        bookmark.setBookId(bookId);
+        bookmark.setName(name);
+        bookmark.setNote(note);
+        bookmark.setChapterIndex(chapterIndex);
+        bookmark.setChapterTitle(chapterTitle);
+        bookmark.setProgress(progress);
+        bookmark.setCreatedAt(System.currentTimeMillis());
+
+        bookmarkRepository.save(bookmark);
+    }
+
+    public List<Bookmark> getBookmarks(String bookId){
+        return bookmarkRepository.findByBookIdOrderByCreatedAtDesc(bookId);
     }
 }

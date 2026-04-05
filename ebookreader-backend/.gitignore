@@ -35,3 +35,4 @@ build/
 # Ignore user uploaded and test EPUB books
 test-books/
 *.epub
+library.sqlite
