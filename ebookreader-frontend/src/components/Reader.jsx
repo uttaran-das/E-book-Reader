@@ -136,7 +136,7 @@ export default function Reader({ book, onBack }) {
     if (themeStyleEl) {
       themeStyleEl.textContent = `
         html, body { background-color: ${backgroundColor} !important; color: ${color} !important; }
-        body * { background-color: transparent !important; }
+        body * { background-color: transparent !important; color: inherit !important; }
       `;
     }
   }, [theme, chapterContent]);

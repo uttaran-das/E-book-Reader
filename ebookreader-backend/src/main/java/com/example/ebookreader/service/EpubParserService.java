@@ -1,8 +1,11 @@
 package com.example.ebookreader.service;
 
 import com.example.ebookreader.dto.EbookDto;
+import com.example.ebookreader.dto.SearchResultDto;
 import com.example.ebookreader.entity.Book;
+import com.example.ebookreader.entity.BookContent;
 import com.example.ebookreader.entity.Bookmark;
+import com.example.ebookreader.repository.BookContentRepository;
 import com.example.ebookreader.repository.BookRepository;
 import com.example.ebookreader.repository.BookmarkRepository;
 import org.slf4j.Logger;
@@ -36,13 +39,15 @@ public class EpubParserService {
     private final BookRepository bookRepository;
     private final BookmarkRepository bookmarkRepository;
     private final Path uploadPath;
+    private final BookContentRepository bookContentRepository;
 
-    public EpubParserService(BookRepository bookRepository, BookmarkRepository bookmarkRepository){
+    public EpubParserService(BookRepository bookRepository, BookmarkRepository bookmarkRepository, BookContentRepository bookContentRepository) {
         this.bookRepository = bookRepository;
         this.bookmarkRepository = bookmarkRepository;
+        this.bookContentRepository = bookContentRepository;
         this.uploadPath = Paths.get("library_files").toAbsolutePath().normalize();
 
-        try{
+        try {
             Files.createDirectories(this.uploadPath);
             logger.info("Library folder ready at: {}", this.uploadPath);
         } catch (IOException e) {
@@ -166,14 +171,14 @@ public class EpubParserService {
         Files.copy(file.getInputStream(), destination, StandardCopyOption.REPLACE_EXISTING);
 
         MessageDigest digest = MessageDigest.getInstance("SHA-256");
-        try(InputStream is = Files.newInputStream(destination)){
+        try (InputStream is = Files.newInputStream(destination)) {
             byte[] buffer = new byte[8192]; // 8KB: Optimal size for OS page alignment and disk I/O throughput
             int bytesRead;
-            while((bytesRead=is.read(buffer))!=-1) digest.update(buffer,0,bytesRead);
+            while ((bytesRead = is.read(buffer)) != -1) digest.update(buffer, 0, bytesRead);
         }
 
-        String fileHash= HexFormat.of().formatHex(digest.digest());
-        if(bookRepository.existsByFileHash(fileHash)) {
+        String fileHash = HexFormat.of().formatHex(digest.digest());
+        if (bookRepository.existsByFileHash(fileHash)) {
             Files.deleteIfExists(destination);
             logger.warn("Rejected duplicate file upload. Hash: {}", fileHash);
             throw new RuntimeException("DUPLICATE: This exact file is already in your library.");
@@ -184,27 +189,27 @@ public class EpubParserService {
         book.setFilePath(destination.toString());
         book.setFileHash(fileHash);
 
-        try(ZipFile zipFile = new ZipFile(destination.toFile())){
+        try (ZipFile zipFile = new ZipFile(destination.toFile())) {
             DocumentBuilder builder = DocumentBuilderFactory.newInstance().newDocumentBuilder();
             ZipEntry containerEntry = zipFile.getEntry("META-INF/container.xml");
             Document containerDoc = builder.parse(zipFile.getInputStream(containerEntry));
             String opfPath = containerDoc.getElementsByTagName("rootfile").item(0).getAttributes()
                     .getNamedItem("full-path").getNodeValue();
-            String basePath = opfPath.contains("/")?opfPath.substring(0,opfPath.lastIndexOf("/")+1):"";
+            String basePath = opfPath.contains("/") ? opfPath.substring(0, opfPath.lastIndexOf("/") + 1) : "";
             ZipEntry opfEntry = zipFile.getEntry(opfPath);
             Document opfDoc = builder.parse(zipFile.getInputStream(opfEntry));
 
             // Title
             NodeList titleNodes = opfDoc.getElementsByTagName("dc:title");
-            if(titleNodes.getLength()>0) book.setTitle(titleNodes.item(0).getTextContent());
+            if (titleNodes.getLength() > 0) book.setTitle(titleNodes.item(0).getTextContent());
 
             // Author
             NodeList authorNodes = opfDoc.getElementsByTagName("dc:creator");
-            if(authorNodes.getLength()>0) book.setAuthor(authorNodes.item(0).getTextContent());
+            if (authorNodes.getLength() > 0) book.setAuthor(authorNodes.item(0).getTextContent());
 
             // Language
             NodeList langNodes = opfDoc.getElementsByTagName("dc:language");
-            if(langNodes.getLength() > 0) book.setLanguage(langNodes.item(0).getTextContent());
+            if (langNodes.getLength() > 0) book.setLanguage(langNodes.item(0).getTextContent());
 
             // Total chapters
             NodeList spineNodes = opfDoc.getElementsByTagName("itemref");
@@ -213,27 +218,130 @@ public class EpubParserService {
             // Image
             String coverId = null;
             NodeList metaNodes = opfDoc.getElementsByTagName("meta");
-            for(int i=0; i<metaNodes.getLength(); i++){
+            for(int i = 0; i < metaNodes.getLength(); i++) {
                 Element meta = (Element) metaNodes.item(i);
-                if("cover".equals(meta.getAttribute("name"))){
+                if("cover".equals(meta.getAttribute("name"))) {
                     coverId = meta.getAttribute("content");
                     break;
                 }
             }
+
+            String foundCoverPath = null;
             NodeList itemNodes = opfDoc.getElementsByTagName("item");
+
+            // Strict EPUB Standard Matching (Checks for official tags)
             for(int i = 0; i < itemNodes.getLength(); i++) {
                 Element item = (Element) itemNodes.item(i);
-                // Matches EPUB 2 cover ID or EPUB 3 cover-image property
-                if(item.getAttribute("id").equals(coverId)
-                        || "cover-image".equals(item.getAttribute("properties"))) {
-                    book.setCoverPath(basePath + item.getAttribute("href"));
+                if((coverId != null && coverId.equals(item.getAttribute("id"))) ||
+                        "cover-image".equals(item.getAttribute("properties"))) {
+                    foundCoverPath = basePath + item.getAttribute("href");
                     break;
                 }
             }
+
+            // Fallback Heuristics for poorly formatted EPUBs
+            // If the publisher didn't tag the cover, hunt for an image named "cover"
+            if (foundCoverPath == null) {
+                for(int i = 0; i < itemNodes.getLength(); i++) {
+                    Element item = (Element) itemNodes.item(i);
+                    String id = item.getAttribute("id").toLowerCase();
+                    String href = item.getAttribute("href").toLowerCase();
+                    String mediaType = item.getAttribute("media-type").toLowerCase();
+
+                    // If it's an image AND the filename or ID contains the word "cover"
+                    if (mediaType.startsWith("image/") && (id.contains("cover") || href.contains("cover"))) {
+                        foundCoverPath = basePath + item.getAttribute("href");
+                        break; // Found a highly likely cover image!
+                    }
+                }
+            }
+
+            book.setCoverPath(foundCoverPath);
         }
 
         bookRepository.save(book);
+        logger.info("Successfully saved unique book: {} ({})", book.getTitle(), bookId);
+
+        // We parse the EPUB to extract the pure text of every chapter
+        EbookDto parsedData = parseEpub(bookId);
+        for (int i = 0; i < parsedData.getSpine().size(); i++) {
+            String chapterPath = parsedData.getSpine().get(i);
+            String rawHtml = getChapterContent(bookId, chapterPath);
+
+            String cleanText = rawHtml
+                    .replaceAll("(?is)<style.*?>.*?</style>", "") // Remove CSS blocks
+                    .replaceAll("(?is)<.*?>", " ") // Remove HTML tags
+                    .replaceAll("\\s+", " ").trim(); // Clean up spacing
+
+            // Resolve human-readable chapter title
+            String chapterTitle = "Section " + (i + 1);
+            for (EbookDto.TocItem toc : parsedData.getToc()) {
+                if (toc.getHref().split("#")[0].equals(chapterPath)) {
+                    chapterTitle = toc.getTitle();
+                    break;
+                }
+            }
+
+            BookContent content = new BookContent();
+            content.setId(UUID.randomUUID().toString());
+            content.setBookId(bookId);
+            content.setBookTitle(book.getTitle());
+            content.setChapterIndex(i);
+            content.setChapterTitle(chapterTitle);
+            content.setContent(cleanText);
+            bookContentRepository.save(content);
+        }
+
         return bookId;
+    }
+
+    public ArrayList<SearchResultDto> searchLibrary(String query) {
+        ArrayList<BookContent> matches = bookContentRepository.findByContentContainingIgnoreCase(query);
+        ArrayList<SearchResultDto> results = new ArrayList<>();
+
+        String lowerQuery = query.toLowerCase();
+
+        for (BookContent match : matches) {
+            String text = match.getContent();
+            int index = text.toLowerCase().indexOf(lowerQuery);
+
+            if (index >= 0) {
+                // Generate a snippet (60 chars before and after the matched word)
+                int start = Math.max(0, index - 60);
+                int end = Math.min(text.length(), index + query.length() + 60);
+                String snippet = text.substring(start, end).trim();
+
+                if (start > 0) snippet = "..." + snippet;
+                if (end < text.length()) snippet = snippet + "...";
+
+                SearchResultDto dto = new SearchResultDto();
+                dto.setBookId(match.getBookId());
+                dto.setBookTitle(match.getBookTitle());
+                dto.setChapterIndex(match.getChapterIndex());
+                dto.setChapterTitle(match.getChapterTitle());
+                dto.setSnippet(snippet);
+                results.add(dto);
+            }
+        }
+        return results;
+    }
+
+    @org.springframework.transaction.annotation.Transactional
+    public void deleteBooks(ArrayList<String> bookIds) {
+        for (String bookId : bookIds) {
+            Book book = bookRepository.findById(bookId).orElse(null);
+            if (book != null) {
+                try {
+                    Files.deleteIfExists(Paths.get(book.getFilePath()));
+                } catch (IOException e) {
+                    logger.error("Failed to delete file for book: {}", bookId, e);
+                }
+                bookmarkRepository.deleteByBookId(bookId);
+                bookContentRepository.deleteByBookId(bookId);
+                bookRepository.delete(book);
+                logger.info("Deleted book: {}", bookId);
+            }
+        }
     }
 
     private String getFilePathFromDb(String bookId) {
@@ -241,20 +349,20 @@ public class EpubParserService {
                 .getFilePath();
     }
 
-    public List<Book> getAllBooks(){
+    public List<Book> getAllBooks() {
         return bookRepository.findAll();
     }
 
-    public void updateLastReadPosition(String bookId, int chapterIndex, double progress){
+    public void updateLastReadPosition(String bookId, int chapterIndex, double progress) {
         Book book = bookRepository.findById(bookId).orElse(null);
-        if(book!=null){
+        if (book != null) {
             book.setLastReadChapterIndex(chapterIndex);
             book.setLastReadProgress(progress);
             bookRepository.save(book);
         }
     }
 
-    public void saveBookmark(String bookId, String name, String note, int chapterIndex, String chapterTitle, double progress){
+    public void saveBookmark(String bookId, String name, String note, int chapterIndex, String chapterTitle, double progress) {
         Bookmark bookmark = new Bookmark();
         bookmark.setId(UUID.randomUUID().toString());
         bookmark.setBookId(bookId);
@@ -268,7 +376,7 @@ public class EpubParserService {
         bookmarkRepository.save(bookmark);
     }
 
-    public List<Bookmark> getBookmarks(String bookId){
+    public List<Bookmark> getBookmarks(String bookId) {
         return bookmarkRepository.findByBookIdOrderByCreatedAtDesc(bookId);
     }
 }

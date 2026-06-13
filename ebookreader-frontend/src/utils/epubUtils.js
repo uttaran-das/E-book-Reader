@@ -66,7 +66,10 @@ export const transformChapterHtml = (html, chapterPath, themeColors, bookId) => 
       background-color: ${themeColors.backgroundColor} !important; 
       color: ${themeColors.color} !important; 
     }
-    body * { background-color: transparent !important; }
+    body * {
+      background-color: transparent !important;
+      color: inherit !important; /* CRITICAL FIX: Forces hardcoded EPUB text colors to inherit the theme! */
+    }
   `;
   doc.head.appendChild(themeStyle);
 

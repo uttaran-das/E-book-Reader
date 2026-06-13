@@ -1,6 +1,7 @@
 package com.example.ebookreader.controller;
 
 import com.example.ebookreader.dto.EbookDto;
+import com.example.ebookreader.dto.SearchResultDto;
 import com.example.ebookreader.entity.Book;
 import com.example.ebookreader.entity.Bookmark;
 import com.example.ebookreader.service.EpubParserService;
@@ -11,6 +12,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 
@@ -50,12 +52,12 @@ public class EbookController {
     }
 
     @GetMapping("/api/books")
-    public ResponseEntity<List<Book>> getAllBooks(){
+    public ResponseEntity<List<Book>> getAllBooks() {
         return ResponseEntity.ok(epubParserService.getAllBooks());
     }
 
     @GetMapping("/api/book/bookmarks")
-    public ResponseEntity<List<Bookmark>> getBookmarks(@RequestParam String bookId){
+    public ResponseEntity<List<Bookmark>> getBookmarks(@RequestParam String bookId) {
         return ResponseEntity.ok(epubParserService.getBookmarks(bookId));
     }
 
@@ -67,7 +69,7 @@ public class EbookController {
             response.put("bookId", bookId);
             return ResponseEntity.ok(response);
         } catch (Exception e) {
-            if(e.getMessage()!=null && e.getMessage().startsWith("DUPLICATE:")){
+            if (e.getMessage() != null && e.getMessage().startsWith("DUPLICATE:")) {
                 logger.warn("Duplicate file rejected");
                 response.put("error", e.getMessage().replace("DUPLICATE: ", ""));
                 return ResponseEntity.status(409).body(response);
@@ -78,12 +80,18 @@ public class EbookController {
         }
     }
 
+    @DeleteMapping("/api/books")
+    public ResponseEntity<Void> deleteBooks(@RequestParam ArrayList<String> ids) {
+        epubParserService.deleteBooks(ids);
+        return ResponseEntity.ok().build();
+    }
+
     @PostMapping("/api/book/progress")
     public ResponseEntity<Void> updateProgress(
             @RequestParam String bookId,
             @RequestParam int chapterIndex,
-            @RequestParam double progress){
-        epubParserService.updateLastReadPosition(bookId,chapterIndex,progress);
+            @RequestParam double progress) {
+        epubParserService.updateLastReadPosition(bookId, chapterIndex, progress);
         return ResponseEntity.ok().build();
     }
 
@@ -94,8 +102,14 @@ public class EbookController {
             @RequestParam(required = false) String note,
             @RequestParam int chapterIndex,
             @RequestParam String chapterTitle,
-            @RequestParam double progress){
-        epubParserService.saveBookmark(bookId,name,note, chapterIndex, chapterTitle, progress);
+            @RequestParam double progress) {
+        epubParserService.saveBookmark(bookId, name, note, chapterIndex, chapterTitle, progress);
         return ResponseEntity.ok().build();
+    }
+
+    @GetMapping("/api/books/search")
+    public ResponseEntity<ArrayList<SearchResultDto>> searchBooks(@RequestParam String query) {
+        if (query == null || query.trim().length() < 3) return ResponseEntity.badRequest().build();
+        return ResponseEntity.ok(epubParserService.searchLibrary(query));
     }
 }

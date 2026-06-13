@@ -374,3 +374,88 @@
 
   #spacer { height: 48px; }
 }
+
+.book-card.selected {
+  border-color: #ff4d4d;
+  background-color: rgba(255, 77, 77, 0.05);
+  transform: scale(0.98);
+}
+
+.book-card-inner {
+  position: relative;
+  height: 100%;
+}
+
+.select-indicator {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  background: var(--bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: bold;
+  color: transparent;
+  transition: all 0.2s;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+}
+
+.book-card.selected .select-indicator {
+  background: #ff4d4d;
+  border-color: #ff4d4d;
+  color: white;
+}
+
+.btn-danger {
+  color: #ff4d4d;
+  border-color: rgba(255, 77, 77, 0.3);
+  background: rgba(255, 77, 77, 0.1);
+}
+
+.btn-danger:hover {
+  border-color: #ff4d4d;
+  background: rgba(255, 77, 77, 0.2);
+}
+
+.search-container {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 24px;
+  width: 100%;
+  text-align: left;
+}
+
+.search-options {
+  display: flex;
+  gap: 24px;
+  align-items: center;
+  padding-left: 4px;
+}
+
+.search-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14.5px;
+  color: var(--text);
+  cursor: pointer;
+  user-select: none;
+  transition: color 0.2s;
+}
+
+.search-checkbox:hover {
+  color: var(--text-h);
+}
+
+.search-checkbox input[type="checkbox"] {
+  cursor: pointer;
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+  margin: 0;
+}
