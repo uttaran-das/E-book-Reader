@@ -216,43 +216,96 @@ public class EpubParserService {
             book.setTotalChapters(Math.max(1, spineNodes.getLength()));
 
             // Image
+            String foundCoverPath = null;
+
+            // Strict EPUB 2 and 3
             String coverId = null;
             NodeList metaNodes = opfDoc.getElementsByTagName("meta");
-            for(int i = 0; i < metaNodes.getLength(); i++) {
+            for (int i = 0; i < metaNodes.getLength(); i++) {
                 Element meta = (Element) metaNodes.item(i);
-                if("cover".equals(meta.getAttribute("name"))) {
+                if ("cover".equals(meta.getAttribute("name"))) {
                     coverId = meta.getAttribute("content");
                     break;
                 }
             }
-
-            String foundCoverPath = null;
             NodeList itemNodes = opfDoc.getElementsByTagName("item");
-
-            // Strict EPUB Standard Matching (Checks for official tags)
-            for(int i = 0; i < itemNodes.getLength(); i++) {
+            for (int i = 0; i < itemNodes.getLength(); i++) {
                 Element item = (Element) itemNodes.item(i);
-                if((coverId != null && coverId.equals(item.getAttribute("id"))) ||
-                        "cover-image".equals(item.getAttribute("properties"))) {
-                    foundCoverPath = basePath + item.getAttribute("href");
+                // Matches EPUB 2 cover ID or EPUB 3 cover-image property
+                if (item.getAttribute("id").equals(coverId)
+                        || "cover-image".equals(item.getAttribute("properties"))) {
+                    String decodedHref = java.net.URLDecoder.decode(item.getAttribute("href"), StandardCharsets.UTF_8);
+                    foundCoverPath = basePath + decodedHref;
                     break;
                 }
             }
 
-            // Fallback Heuristics for poorly formatted EPUBs
-            // If the publisher didn't tag the cover, hunt for an image named "cover"
+            // Legacy EPUB 2
+            String coverHtmlPath = null;
             if (foundCoverPath == null) {
-                for(int i = 0; i < itemNodes.getLength(); i++) {
-                    Element item = (Element) itemNodes.item(i);
-                    String id = item.getAttribute("id").toLowerCase();
-                    String href = item.getAttribute("href").toLowerCase();
-                    String mediaType = item.getAttribute("media-type").toLowerCase();
-
-                    // If it's an image AND the filename or ID contains the word "cover"
-                    if (mediaType.startsWith("image/") && (id.contains("cover") || href.contains("cover"))) {
-                        foundCoverPath = basePath + item.getAttribute("href");
-                        break; // Found a highly likely cover image!
+                NodeList guideNodes = opfDoc.getElementsByTagName("reference");
+                for (int i = 0; i < guideNodes.getLength(); i++) {
+                    Element ref = (Element) guideNodes.item(i);
+                    if ("cover".equalsIgnoreCase(ref.getAttribute("type"))) {
+                        String decodedHref = java.net.URLDecoder.decode(ref.getAttribute("href"), StandardCharsets.UTF_8);
+                        coverHtmlPath = basePath + decodedHref;
+                        break;
                     }
+                }
+            }
+
+            // Fallback - Guess the first page is the cover
+            if (foundCoverPath == null && coverHtmlPath == null) {
+                NodeList spineItemsForCover = opfDoc.getElementsByTagName("itemref");
+                if (spineItemsForCover.getLength() > 0) {
+                    String firstIdref = ((Element) spineItemsForCover.item(0)).getAttribute("idref");
+                    for (int i = 0; i < itemNodes.getLength(); i++) {
+                        Element item = (Element) itemNodes.item(i);
+                        if (item.getAttribute("id").equals(firstIdref)) {
+                            String decodedHref = java.net.URLDecoder.decode(item.getAttribute("href"), StandardCharsets.UTF_8);
+                            coverHtmlPath = basePath + decodedHref;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // If HTML cover page, scrape it for the <img> tag
+            if (foundCoverPath == null && coverHtmlPath != null) {
+                try {
+                    // Clean up URL anchors (e.g., cover.xhtml#top -> cover.xhtml)
+                    String cleanHtmlPath = coverHtmlPath.split("#")[0];
+                    ZipEntry htmlEntry = zipFile.getEntry(cleanHtmlPath);
+                    if (htmlEntry != null) {
+                        try (InputStream is = zipFile.getInputStream(htmlEntry)) {
+                            String htmlContent = new String(is.readAllBytes(), StandardCharsets.UTF_8);
+                            // Match <img src="X"> or <image xlink:href="X">
+                            java.util.regex.Matcher m = java.util.regex.Pattern.compile("(?is)<(?:img|image)[^>]+(?:src|xlink:href)\\s*=\\s*['\"]([^'\"]+)['\"]").matcher(htmlContent);
+                            if (m.find()) {
+                                String imageSrc = java.net.URLDecoder.decode(m.group(1), StandardCharsets.UTF_8);
+
+                                // Resolve Relative Path
+                                String parentDir = cleanHtmlPath.contains("/") ? cleanHtmlPath.substring(0, cleanHtmlPath.lastIndexOf("/") + 1) : "";
+                                String[] baseParts = parentDir.split("/");
+                                String[] relativeParts = imageSrc.split("/");
+
+                                java.util.List<String> resolvedParts = new java.util.ArrayList<>();
+                                for (String p : baseParts) if (!p.isEmpty()) resolvedParts.add(p);
+
+                                for (String part : relativeParts) {
+                                    if (part.equals(".")) continue;
+                                    if (part.equals("..") && !resolvedParts.isEmpty())
+                                        resolvedParts.remove(resolvedParts.size() - 1);
+                                    else if (!part.isEmpty()) resolvedParts.add(part);
+                                }
+                                foundCoverPath = String.join("/", resolvedParts);
+                            }
+
+                            book.setCoverPath(foundCoverPath);
+                        }
+                    }
+                } catch (Exception e) {
+                    logger.warn("Failed to scrape HTML cover page", e);
                 }
             }
 
@@ -262,34 +315,41 @@ public class EpubParserService {
         bookRepository.save(book);
         logger.info("Successfully saved unique book: {} ({})", book.getTitle(), bookId);
 
-        // We parse the EPUB to extract the pure text of every chapter
-        EbookDto parsedData = parseEpub(bookId);
-        for (int i = 0; i < parsedData.getSpine().size(); i++) {
-            String chapterPath = parsedData.getSpine().get(i);
-            String rawHtml = getChapterContent(bookId, chapterPath);
+        try {
+            EbookDto parsedData = parseEpub(bookId);
+            for (int i = 0; i < parsedData.getSpine().size(); i++) {
+                String chapterPath = parsedData.getSpine().get(i);
+                String rawHtml = getChapterContent(bookId, chapterPath);
 
-            String cleanText = rawHtml
-                    .replaceAll("(?is)<style.*?>.*?</style>", "") // Remove CSS blocks
-                    .replaceAll("(?is)<.*?>", " ") // Remove HTML tags
-                    .replaceAll("\\s+", " ").trim(); // Clean up spacing
+                // Strip HTML tags using Regex to get pure searchable text
+                String cleanText = rawHtml
+                        .replaceAll("(?is)<style.*?>.*?</style>", "")
+                        .replaceAll("(?is)<.*?>", " ")
+                        .replaceAll("\\s+", " ").trim();
 
-            // Resolve human-readable chapter title
-            String chapterTitle = "Section " + (i + 1);
-            for (EbookDto.TocItem toc : parsedData.getToc()) {
-                if (toc.getHref().split("#")[0].equals(chapterPath)) {
-                    chapterTitle = toc.getTitle();
-                    break;
+                // Resolve the human-readable chapter title
+                String chapterTitle = "Section " + (i + 1);
+                if (parsedData.getToc() != null) {
+                    for (EbookDto.TocItem toc : parsedData.getToc()) {
+                        if (toc.getHref().split("#")[0].equals(chapterPath)) {
+                            chapterTitle = toc.getTitle();
+                            break;
+                        }
+                    }
                 }
-            }
 
-            BookContent content = new BookContent();
-            content.setId(UUID.randomUUID().toString());
-            content.setBookId(bookId);
-            content.setBookTitle(book.getTitle());
-            content.setChapterIndex(i);
-            content.setChapterTitle(chapterTitle);
-            content.setContent(cleanText);
-            bookContentRepository.save(content);
+                BookContent content = new BookContent();
+                content.setId(UUID.randomUUID().toString());
+                content.setBookId(bookId);
+                content.setBookTitle(book.getTitle());
+                content.setChapterIndex(i);
+                content.setChapterTitle(chapterTitle);
+                content.setContent(cleanText);
+                bookContentRepository.save(content);
+            }
+            logger.info("Successfully indexed content for search.");
+        } catch (Exception e) {
+            logger.error("Failed to index book content for search", e);
         }
 
         return bookId;

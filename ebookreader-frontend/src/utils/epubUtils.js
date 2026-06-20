@@ -15,7 +15,7 @@ export const themeStyles = {
 };
 
 export const resolvePath = (basePath, relativePath) => {
-  const stack = basePath.split('/').slice(0,-1);
+  const stack = basePath.split('/').slice(0, -1);
   const parts = relativePath.split('/');
   for (let part of parts) {
     if (part === '.') continue;
@@ -52,6 +52,10 @@ export const transformChapterHtml = (html, chapterPath, themeColors, bookId) => 
         }
       }
     });
+
+    document.addEventListener('keydown', (e) => {
+      window.parent.postMessage({ type: 'epub-keydown', key: e.key }, '*');
+    });
   `;
   doc.body.appendChild(script);
 
@@ -77,5 +81,10 @@ export const transformChapterHtml = (html, chapterPath, themeColors, bookId) => 
 }
 
 export const getExactWidth = (iframeDoc, iframeWin) => {
-  return iframeDoc.documentElement.getBoundingClientRect().width || iframeWin.innerWidth;
+  let width = iframeDoc?.documentElement?.getBoundingClientRect()?.width || iframeWin?.innerWidth;
+  if (!width || width <= 0) {
+    const readerEl = document.getElementById('reader');
+    width = readerEl ? readerEl.clientWidth : window.innerWidth;
+  }
+  return Math.max(width, 1);
 }

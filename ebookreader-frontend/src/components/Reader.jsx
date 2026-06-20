@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useCallback, useState, useEffect, useRef } from 'react';
 import BookmarksPanel from './BookmarksPanel';
 import { API_BASE, THEME_CYCLE, themeStyles, resolvePath, transformChapterHtml, getExactWidth } from '../utils/epubUtils';
 
@@ -6,21 +6,24 @@ export default function Reader({ book, onBack }) {
   const [bookInfo, setBookInfo] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-  
+
   const [currentChapterIndex, setCurrentChapterIndex] = useState(book.lastReadChapterIndex || 0);
   const [chapterContent, setChapterContent] = useState("");
   const [chapterLoading, setChapterLoading] = useState(false);
-  const [theme, setTheme] = useState('dark'); 
-  
+  const [theme, setTheme] = useState('dark');
+
   const [targetHash, setTargetHash] = useState("");
-  const [activeTocHref, setActiveTocHref] = useState(""); 
+  const [activeTocHref, setActiveTocHref] = useState("");
   const [chapterPage, setChapterPage] = useState(0);
   const [chapterTotalPages, setChapterTotalPages] = useState(1);
-  const [startAtLastPage, setStartAtLastPage] = useState(false); 
+  const [startAtLastPage, setStartAtLastPage] = useState(false);
   const [savedProgress, setSavedProgress] = useState(book.lastReadProgress != null ? book.lastReadProgress : 0);
-  
+
   const [showBookmarks, setShowBookmarks] = useState(false);
-  
+
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [isIframeReady, setIsIframeReady] = useState(false);
+
   const iframeRef = useRef(null);
   const themeRef = useRef(theme);
 
@@ -50,8 +53,9 @@ export default function Reader({ book, onBack }) {
 
     const controller = new AbortController();
     const chapterPath = bookInfo.spine[currentChapterIndex];
-    
+
     setChapterLoading(true);
+    setIsIframeReady(false);
 
     fetch(`${API_BASE}/book/chapter?bookId=${book.id}&chapterPath=${encodeURIComponent(chapterPath)}`, { signal: controller.signal })
       .then(res => res.text())
@@ -82,9 +86,29 @@ export default function Reader({ book, onBack }) {
     }).catch(err => console.error("Failed to save progress", err));
   }, [currentChapterIndex, chapterPage, book.id, chapterTotalPages]);
 
-  // Handle Iframe link clicks (Message Listener)
+  const handleKeyDown = useCallback((key) => {
+    if (key === 'ArrowRight') goToNext();
+    else if (key === 'ArrowLeft') goToPrev();
+    else if (key === 'Escape') setIsFullscreen(false);
+  }, [chapterPage, chapterTotalPages, currentChapterIndex, bookInfo, isIframeReady]);
+
+  // Attach Keyboard Listener to Parent Window
+  useEffect(() => {
+    const listener = (e) => handleKeyDown(e.key);
+    window.addEventListener('keydown', listener);
+    return () => window.removeEventListener('keydown', listener);
+  }, [handleKeyDown]);
+
+  // Handle Iframe messages (Links & Iframe Keypresses)
   useEffect(() => {
     const handleMessage = (e) => {
+      // Handle keyboard events passed up from the iframe
+      if (e.data?.type === 'epub-keydown') {
+        handleKeyDown(e.data.key);
+        return;
+      }
+
+      // Handle standard link clicks
       if (e.data?.type !== 'epub-link') return;
       const [targetPath, hash] = decodeURIComponent(e.data.href).split('#');
 
@@ -112,18 +136,17 @@ export default function Reader({ book, onBack }) {
           if (targetIndex === currentChapterIndex) {
             if (hash) calculatePageForHash(hash);
           } else {
+            setIsIframeReady(false);
             if (hash) setTargetHash(hash);
             setCurrentChapterIndex(targetIndex);
           }
-        } else {
-          console.warn("Could not find linked chapter in spine:", absoluteTargetPath);
         }
       }
     };
 
     window.addEventListener('message', handleMessage);
     return () => window.removeEventListener('message', handleMessage);
-  }, [bookInfo, currentChapterIndex]);
+  }, [bookInfo, currentChapterIndex, handleKeyDown]);
 
   // Update theme inside iframe dynamically
   useEffect(() => {
@@ -147,11 +170,11 @@ export default function Reader({ book, onBack }) {
       const iframeDoc = iframeRef.current?.contentDocument;
       const iframeWin = iframeRef.current?.contentWindow;
       if (!iframeDoc || !iframeWin) return;
-       
+
       const totalWidth = iframeDoc.body.scrollWidth;
       const viewportWidth = getExactWidth(iframeDoc, iframeWin);
       const newTotalPages = Math.max(1, Math.ceil((totalWidth - 5) / viewportWidth));
-      
+
       setChapterTotalPages(newTotalPages);
       setChapterPage(prevPage => {
         const clampedPage = Math.min(prevPage, newTotalPages - 1);
@@ -163,7 +186,7 @@ export default function Reader({ book, onBack }) {
     window.addEventListener('resize', handleResize);
     const iframeWin = iframeRef.current?.contentWindow;
     if (iframeWin) iframeWin.addEventListener('resize', handleResize);
-    
+
     return () => {
       window.removeEventListener('resize', handleResize);
       if (iframeWin) iframeWin.removeEventListener('resize', handleResize);
@@ -232,18 +255,20 @@ export default function Reader({ book, onBack }) {
           const absLeft = el.getBoundingClientRect().left + iframeWin.scrollX;
           targetPage = Math.floor(absLeft / viewportWidth);
         }
-        setTargetHash(""); 
+        setTargetHash("");
       } else if (startAtLastPage) {
-        targetPage = pages - 1; 
+        targetPage = pages - 1;
         setStartAtLastPage(false);
       } else if (savedProgress !== null) {
         targetPage = Math.floor(savedProgress * pages);
-        setSavedProgress(null); 
+        setSavedProgress(null);
       }
-      
+
       targetPage = Math.min(targetPage, pages - 1);
       setChapterPage(targetPage);
       updateDropdownToMatchPage(targetPage);
+
+      setIsIframeReady(true);
     }, 100);
   }
 
@@ -252,7 +277,7 @@ export default function Reader({ book, onBack }) {
     setActiveTocHref(selectedHref);
     const [targetPath, hash] = selectedHref.split('#');
     const targetIndex = bookInfo.spine.indexOf(targetPath);
-    
+
     if (targetIndex !== -1) {
       if (targetIndex === currentChapterIndex) {
         const iframeDoc = iframeRef.current?.contentDocument;
@@ -269,6 +294,7 @@ export default function Reader({ book, onBack }) {
           }
         }
       } else {
+        setIsIframeReady(false);
         if (hash) setTargetHash(hash);
         setStartAtLastPage(false);
         setCurrentChapterIndex(targetIndex);
@@ -277,15 +303,29 @@ export default function Reader({ book, onBack }) {
   }
 
   const goToNext = () => {
-    if (chapterPage < chapterTotalPages - 1) setChapterPage(prev => prev + 1);
-    else if (currentChapterIndex < bookInfo.spine.length - 1) setCurrentChapterIndex(currentChapterIndex + 1);
+    if (!bookInfo || !isIframeReady) return;
+
+    if (chapterPage < chapterTotalPages - 1) {
+      setChapterPage(prev => prev + 1);
+    } else if (currentChapterIndex < bookInfo.spine.length - 1) {
+      setIsIframeReady(false);
+      setChapterPage(0);
+      setChapterTotalPages(1);
+      setCurrentChapterIndex(prev => prev + 1);
+    }
   }
 
   const goToPrev = () => {
-    if (chapterPage > 0) setChapterPage(prev => prev - 1);
-    else if (currentChapterIndex > 0) {
+    if (!bookInfo || !isIframeReady) return;
+
+    if (chapterPage > 0) {
+      setChapterPage(prev => prev - 1);
+    } else if (currentChapterIndex > 0) {
+      setIsIframeReady(false)
       setStartAtLastPage(true);
-      setCurrentChapterIndex(currentChapterIndex - 1);
+      setChapterPage(0);
+      setChapterTotalPages(1);
+      setCurrentChapterIndex(prev => prev - 1);
     }
   }
 
@@ -294,6 +334,7 @@ export default function Reader({ book, onBack }) {
       let targetPage = Math.floor(bookmark.progress * chapterTotalPages);
       setChapterPage(Math.min(targetPage, chapterTotalPages - 1));
     } else {
+      setIsIframeReady(false);
       setSavedProgress(bookmark.progress);
       setCurrentChapterIndex(bookmark.chapterIndex);
     }
@@ -317,44 +358,57 @@ export default function Reader({ book, onBack }) {
   const currentThemeConfig = themeStyles[theme] ?? themeStyles.default;
 
   return (
-    <>
-      <div id="center">
-        <div style={{ position: 'relative', width: '100%', textAlign: 'center' }}>
-          <button className="counter" onClick={onBack} style={{ position: 'absolute', left: 0, top: '50%', transform: 'translateY(-50%)', margin: 0 }}>
-            ← Library
-          </button>
-          <h1 style={{ fontSize: '32px', margin: '0 0 8px 0' }}>{bookInfo.title}</h1>
-          <h2 style={{ fontSize: '18px', margin: 0 }}>By {bookInfo.author}</h2>
+    <div className="reader-app-container">
+      {!isFullscreen && (
+        <div id="center">
+          <div style={{ position: 'relative', width: '100%', textAlign: 'center', maxWidth: '1200px' }}>
+            <button className="counter" onClick={onBack} style={{ position: 'absolute', left: 0, top: '50%', transform: 'translateY(-50%)', margin: 0 }}>
+              ← Library
+            </button>
+            <h1 style={{ fontSize: '32px', margin: '0 0 8px 0' }}>{bookInfo.title}</h1>
+            <h2 style={{ fontSize: '18px', margin: 0 }}>By {bookInfo.author}</h2>
+          </div>
+
+          <div className='controls-container' style={{ marginTop: '20px' }}>
+            <button className="counter nav-button" onClick={goToPrev} disabled={!isIframeReady || (currentChapterIndex === 0 && chapterPage === 0)}>Previous</button>
+
+            {bookInfo.toc && bookInfo.toc.length > 0 ? (
+              <select className="counter toc-select" value={activeTocHref} onChange={handleTocChange}>
+                <option value="" disabled>--- Chapters ---</option>
+                {bookInfo.toc.map((item, idx) => (
+                  <option key={idx} value={item.href}>{item.title}</option>
+                ))}
+              </select>
+            ) : null}
+
+            <code className='page-tracker'>Page {chapterPage + 1} of {chapterTotalPages}</code>
+
+            <button className="counter nav-button" onClick={goToNext} disabled={!isIframeReady || (currentChapterIndex === bookInfo.spine.length - 1 && chapterPage === chapterTotalPages - 1)}>Next</button>
+            <button className="counter theme-button" onClick={cycleTheme}>Theme: {theme.charAt(0).toUpperCase() + theme.slice(1)}</button>
+
+            <button className="counter theme-button" onClick={() => setIsFullscreen(true)}>⛶ Fullscreen</button>
+            <button className="counter theme-button" onClick={() => setShowBookmarks(true)}>🔖 Bookmarks</button>
+          </div>
         </div>
+      )}
 
-        <div className='controls-container' style={{ marginTop: '20px' }}>
-          <button className="counter nav-button" onClick={goToPrev} disabled={currentChapterIndex === 0 && chapterPage === 0}>Previous</button>
-          
-          {bookInfo.toc && bookInfo.toc.length > 0 ? (
-            <select className="counter toc-select" value={activeTocHref} onChange={handleTocChange}>
-              <option value="" disabled>--- Chapters ---</option>
-              {bookInfo.toc.map((item, idx) => (
-                <option key={idx} value={item.href}>{item.title}</option>
-              ))}
-            </select>
-          ) : null}
+      {isFullscreen && (
+        <button className="floating-exit-btn" onClick={() => setIsFullscreen(false)} title="Exit Fullscreen (Esc)">
+          ⤡ Exit Fullscreen
+        </button>
+      )}
 
-          <code className='page-tracker'>Page {chapterPage + 1} of {chapterTotalPages}</code>
-          
-          <button className="counter nav-button" onClick={goToNext} disabled={currentChapterIndex === bookInfo.spine.length - 1 && chapterPage === chapterTotalPages - 1}>Next</button>
-          <button className="counter theme-button" onClick={cycleTheme}>Theme: {theme.charAt(0).toUpperCase() + theme.slice(1)}</button>
-          
-          <button className="counter theme-button" onClick={() => setShowBookmarks(true)}>🔖 Bookmarks</button>
-        </div>
-      </div>
-
-      <div id="reader" style={{ backgroundColor: currentThemeConfig.backgroundColor }}>
+      <div
+        id="reader"
+        className={isFullscreen ? "fullscreen-active" : ""}
+        style={{ backgroundColor: currentThemeConfig.backgroundColor }}
+      >
         {chapterLoading ? (
           <p style={{ color: currentThemeConfig.color, textAlign: 'center' }}>Loading chapter text...</p>
         ) : (
-          <iframe 
+          <iframe
             ref={iframeRef}
-            srcDoc={chapterContent} 
+            srcDoc={chapterContent}
             title="Book Reader"
             onLoad={handleIframeLoad}
             className='reader-iframe'
@@ -363,7 +417,7 @@ export default function Reader({ book, onBack }) {
       </div>
 
       {showBookmarks && (
-        <BookmarksPanel 
+        <BookmarksPanel
           bookId={book.id}
           currentChapterIndex={currentChapterIndex}
           chapterPage={chapterPage}
@@ -373,6 +427,6 @@ export default function Reader({ book, onBack }) {
           onClose={() => setShowBookmarks(false)}
         />
       )}
-    </>
+    </div>
   );
 }
